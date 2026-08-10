@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 # Python
 __pycache__/
 *.pyc
@@ -7,6 +6,3 @@ __pycache__/
 
 # Scratch submission folder written by the forward-models notebook
 notebooks/_contest_demo/
-=======
-*.pyc
->>>>>>> accce1e (Add gitignore)
