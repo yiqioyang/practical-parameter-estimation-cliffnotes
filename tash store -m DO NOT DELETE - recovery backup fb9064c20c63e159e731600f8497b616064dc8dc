@@ -1,0 +1,478 @@
+[1mdiff --git a/CLAUDE.md b/CLAUDE.md[m
+[1mindex 2b7b631..4063c97 100644[m
+[1m--- a/CLAUDE.md[m
+[1m+++ b/CLAUDE.md[m
+[36m@@ -3,23 +3,28 @@[m [mThis is a repo that[m
+     2. Generate datasets of varying qualities (how non-linear, size of the dataset)[m
+     3. Apply these methods to test their performance, and also illustrate their pros and cons[m
+ [m
+[31m-Currently, we are working on Point 2. Generate the data.[m
+ [m
+[31m-We want to have many different functions that generate the data, and here are a few concerns in how the data are generated[m
+[31m-1. The numbers of parameters (dim of inputs), outputs, and how many data there are[m
+[31m-2. How linear/non-linear the data are[m
+[31m-3. Whether the data are from some relatively more sophisticated models, e.g., from PDEs[m
+[31m-4. Whether we should consider observational error (more later)[m
+ [m
+[32m+[m[32m2026 July 17th[m
+[32m+[m[32mCurrently, we are working on Point 2. Generate the data. We are skipping Points 1 and 3 for now[m
+[32m+[m[32mOne important concern is that we need to generate the data systematically across different kind of data (linear, non-linear, PDE and etc)[m
+[32m+[m[32mWe want to highlight the full (if possible) spectrum of challenges in practical parameter estimation.[m
+[32m+[m[32mA few challenges are listed here:[m
+[32m+[m[32m    a) Parameter estimation efficiency (e.g., the use of more efficient sampling strategy);[m
+[32m+[m[32m    b) Poor emulator performance;[m
+[32m+[m[32m    c) Structural error;[m
+[32m+[m[32m    d) The strategy if we are given too few (hard to constrian the parameters effectively) or too many targets (structural error-prone);[m[41m [m
+[32m+[m[32m    e) When we do waves/iterations of parameter estimation, what is the best strategy (whether take all previous runs in training or a mixture, etc);[m
+[32m+[m[32m    f) Using scores or raw model outputs as emulator targets;[m
+[32m+[m[32m    g) If sensitivity test could help inform more efficient sampling strategy?[m[41m [m
+[32m+[m[32m    h) The presence of multi-modes in the solutions.[m
+[32m+[m[32m    i) The relative importance of parameters (some parameters are important after others are better constrained)[m
+ [m
+[31m-And the different functions should output the following:[m
+[31m-1. The X, the Y, the true observations, and the correponding parameters that are used to generate the data.[m
+[31m-    Here we should allow for 10-100 parameters, 30-1000 data points, and 10-500 observations[m
+[31m-2. They should all be stored in one file[m
+[31m-3. We should be able to control what observatoins have structural error, and the level of that structural error[m
+[32m+[m[32mAnother challenge is to make all the generated data formated systematically. For example, a nc file that has everything in it or[m[41m [m
+[32m+[m[32mcsv files and etc.[m[41m [m
+ [m
+[31m-So currently the challenge is how flexible we make the function? To what level we define them? [m
+[31m-The other equally important question is that we must be able to visualize the data based on how they are generated.[m
+[31m-In my ideal world, I want something that's like a chart that has bars showing (not exactly but rougly) how non-linear they are, how sparse they are and etc. [m
+[32m+[m[32mSimilarly, once we have an ensemble of estimated parameters, we also need to be able to apply them to the moedel and check the results. This[m[41m [m
+[32m+[m[32mwill help us deploy the methodology of simulation (which is what is this for)-emulation-sampling iteration.[m
+[32m+[m
+[32m+[m[32mIt is also good to be able to inject different kind of errors or uncertainties to the data (e.g., obs error, structural error). Here the structural error can be something like a set of x_1 values that map to y_1 given a model m_1, in addition, we are also given some y_2 that is generated from a different x_2 given model y_2. x_1 and x_2 share the same parameter space. This set up is to simulate the scenario where there is no parameter values that could satisify y_1 and y_2 given m_1 and m_2[m
+ [m
+[31m-We also need to be able to visualize the dataset. [m
+\ No newline at end of file[m
+[1mdiff --git a/data_generator_funs/dataset.py b/data_generator_funs/dataset.py[m
+[1mindex 420664a..c0f91b3 100644[m
+[1m--- a/data_generator_funs/dataset.py[m
+[1m+++ b/data_generator_funs/dataset.py[m
+[36m@@ -1,10 +1,10 @@[m
+[31m-import os[m
+[31m-[m
+ import numpy as np[m
+ [m
+ from . import exponential, linear, lorenz96, ode, polynomial[m
+ from .linear import sample_X[m
+[31m-from .netcdf_io import default_nc_filename, save_dataset_netcdf  # noqa: F401 (re-exported)[m
+[32m+[m[32mfrom .netcdf_io import (  # noqa: F401 (re-exported)[m
+[32m+[m[32m    default_nc_filename, load_linear_dataset, save_dataset_folder, save_dataset_netcdf,[m
+[32m+[m[32m)[m
+ [m
+ """Top-level dataset assembly: sample an (n_samples + 1)-row ensemble, generate[m
+ coefficients, compute Y, hold out the last row as the single "true" input/[m
+[36m@@ -99,6 +99,8 @@[m [mdef _abbreviate_kwarg_name(key):[m
+ [m
+ [m
+ def _format_kwarg_value(value):[m
+[32m+[m[32m    if isinstance(value, (list, tuple)):[m
+[32m+[m[32m        return "-".join(_format_kwarg_value(v) for v in value)[m
+     if isinstance(value, float) and value.is_integer():[m
+         value = int(value)[m
+     return str(value).replace(".", "p").replace("-", "m")[m
+[36m@@ -111,6 +113,36 @@[m [mdef _structure_kwargs_suffix(structure_kwargs):[m
+     return "_" + "_".join(parts)[m
+ [m
+ [m
+[32m+[m[32mdef _generate_structured_coefficients(module, n_params, n_outputs, structure, structure_kwargs, seed):[m
+[32m+[m[32m    """Shared structure= dispatch for linear.py/exponential.py, which expose the[m
+[32m+[m[32m    same four coefficient generators (full/diag/triu/blocks) under the same[m
+[32m+[m[32m    names. Returns (coefficients, paras_to_vary, outputs_to_vary, extra_arrays)[m
+[32m+[m[32m    -- extra_arrays is {} except for structure="blocks", where it carries[m
+[32m+[m[32m    param_group_id/output_group_id (see linear.generate_matrix_blocks)."""[m
+[32m+[m[32m    structure_kwargs = structure_kwargs or {}[m
+[32m+[m[32m    if structure == "full":[m
+[32m+[m[32m        coefficients, paras_to_vary, outputs_to_vary = module.generate_matrix_full([m
+[32m+[m[32m            n_params, n_outputs, seed=seed, **structure_kwargs)[m
+[32m+[m[32m        return coefficients, paras_to_vary, outputs_to_vary, {}[m
+[32m+[m[32m    if structure == "diag":[m
+[32m+[m[32m        coefficients, paras_to_vary = module.generate_matrix_diag(n_params, n_outputs, seed=seed, **structure_kwargs)[m
+[32m+[m[32m        return coefficients, paras_to_vary, [], {}[m
+[32m+[m[32m    if structure == "triu":[m
+[32m+[m[32m        coefficients = module.generate_matrix_triu(n_params, n_outputs, seed=seed, **structure_kwargs)[m
+[32m+[m[32m        return coefficients, [], [], {}[m
+[32m+[m[32m    if structure == "blocks":[m
+[32m+[m[32m        coefficients, param_group_id, output_group_id = module.generate_matrix_blocks([m
+[32m+[m[32m            n_params, n_outputs, seed=seed, **structure_kwargs)[m
+[32m+[m[32m        return coefficients, [], [], {"param_group_id": param_group_id, "output_group_id": output_group_id}[m
+[32m+[m[32m    if structure == "overlapping_blocks":[m
+[32m+[m[32m        coefficients, param_group_membership, output_group_id = module.generate_matrix_overlapping_blocks([m
+[32m+[m[32m            n_params, n_outputs, seed=seed, **structure_kwargs)[m
+[32m+[m[32m        return coefficients, [], [], {[m
+[32m+[m[32m            "param_group_membership": param_group_membership.astype(int), "output_group_id": output_group_id,[m
+[32m+[m[32m        }[m
+[32m+[m[32m    raise ValueError(f"unknown structure: {structure!r}")[m
+[32m+[m
+[32m+[m
+ def generate_linear_dataset(n_samples, n_params, n_outputs, structure="full", structure_kwargs=None,[m
+                              noise_std=0.0, structural_idx=None, structural_error_level=0.0,[m
+                              seed=None, nc_path=None):[m
+[36m@@ -119,18 +151,8 @@[m [mdef generate_linear_dataset(n_samples, n_params, n_outputs, structure="full", st[m
+     structure_kwargs = structure_kwargs or {}[m
+     X_all = sample_X(n_samples + 1, n_params, seed=seed)[m
+ [m
+[31m-    if structure == "full":[m
+[31m-        coefficients, paras_to_vary, outputs_to_vary = linear.generate_matrix_full([m
+[31m-            n_params, n_outputs, seed=seed, **structure_kwargs)[m
+[31m-    elif structure == "diag":[m
+[31m-        coefficients, paras_to_vary = linear.generate_matrix_diag([m
+[31m-            n_params, n_outputs, seed=seed, **structure_kwargs)[m
+[31m-        outputs_to_vary = [][m
+[31m-    elif structure == "triu":[m
+[31m-        coefficients = linear.generate_matrix_triu(n_params, n_outputs, seed=seed, **structure_kwargs)[m
+[31m-        paras_to_vary, outputs_to_vary = [], [][m
+[31m-    else:[m
+[31m-        raise ValueError(f"unknown structure: {structure!r}")[m
+[32m+[m[32m    coefficients, paras_to_vary, outputs_to_vary, extra_arrays = _generate_structured_coefficients([m
+[32m+[m[32m        linear, n_params, n_outputs, structure, structure_kwargs, seed=seed)[m
+ [m
+     Y_all = linear.compute_Y(X_all, coefficients)[m
+     X, Y, x_true, y_true_clean = X_all[:-1], Y_all[:-1], X_all[-1], Y_all[-1][m
+[36m@@ -140,11 +162,12 @@[m [mdef generate_linear_dataset(n_samples, n_params, n_outputs, structure="full", st[m
+ [m
+     dataset = _package("linear", structure, X, Y, x_true, y_true, {"coefficients": coefficients},[m
+                         paras_to_vary, outputs_to_vary, structural_bias, noise_std,[m
+[31m-                        structural_idx, structural_error_level, seed, n_samples, n_params, n_outputs)[m
+[32m+[m[32m                        structural_idx, structural_error_level, seed, n_samples, n_params, n_outputs,[m
+[32m+[m[32m                        extra_arrays=extra_arrays or None)[m
+     if nc_path:[m
+[31m-        filename = (f"linear_{structure}_n{n_samples}_p{n_params}_o{n_outputs}"[m
+[31m-                    f"{_structure_kwargs_suffix(structure_kwargs)}.nc")[m
+[31m-        save_dataset_netcdf(dataset, os.path.join(nc_path, filename))[m
+[32m+[m[32m        filename_base = (f"linear_{structure}_n{n_samples}_p{n_params}_o{n_outputs}"[m
+[32m+[m[32m                          f"{_structure_kwargs_suffix(structure_kwargs)}")[m
+[32m+[m[32m        save_dataset_folder(dataset, nc_path, filename_base)[m
+     return dataset[m
+ [m
+ [m
+[36m@@ -216,18 +239,8 @@[m [mdef generate_exponential_dataset(n_samples, n_params, n_outputs, structure="full[m
+     structure_kwargs = structure_kwargs or {}[m
+     X_all = sample_X(n_samples + 1, n_params, seed=seed)[m
+ [m
+[31m-    if structure == "full":[m
+[31m-        coefficients, paras_to_vary, outputs_to_vary = exponential.generate_matrix_full([m
+[31m-            n_params, n_outputs, seed=seed, **structure_kwargs)[m
+[31m-    elif structure == "diag":[m
+[31m-        coefficients, paras_to_vary = exponential.generate_matrix_diag([m
+[31m-            n_params, n_outputs, seed=seed, **structure_kwargs)[m
+[31m-        outputs_to_vary = [][m
+[31m-    elif structure == "triu":[m
+[31m-        coefficients = exponential.generate_matrix_triu(n_params, n_outputs, seed=seed, **structure_kwargs)[m
+[31m-        paras_to_vary, outputs_to_vary = [], [][m
+[31m-    else:[m
+[31m-        raise ValueError(f"unknown structure: {structure!r}")[m
+[32m+[m[32m    coefficients, paras_to_vary, outputs_to_vary, extra_arrays = _generate_structured_coefficients([m
+[32m+[m[32m        exponential, n_params, n_outputs, structure, structure_kwargs, seed=seed)[m
+ [m
+     Y_all = exponential.compute_Y(X_all, coefficients)[m
+     X, Y, x_true, y_true_clean = X_all[:-1], Y_all[:-1], X_all[-1], Y_all[-1][m
+[36m@@ -237,7 +250,8 @@[m [mdef generate_exponential_dataset(n_samples, n_params, n_outputs, structure="full[m
+ [m
+     dataset = _package("exponential", structure, X, Y, x_true, y_true, {"coefficients": coefficients},[m
+                         paras_to_vary, outputs_to_vary, structural_bias, noise_std,[m
+[31m-                        structural_idx, structural_error_level, seed, n_samples, n_params, n_outputs)[m
+[32m+[m[32m                        structural_idx, structural_error_level, seed, n_samples, n_params, n_outputs,[m
+[32m+[m[32m                        extra_arrays=extra_arrays or None)[m
+     if nc_path:[m
+         save_dataset_netcdf(dataset, nc_path)[m
+     return dataset[m
+[36m@@ -377,6 +391,161 @@[m [mdef generate_lorenz96_dataset(n_samples, n_states, t_eval, F=8.0,[m
+     return dataset[m
+ [m
+ [m
+[32m+[m[32m_CONFLICTING_TRUTH_FAMILIES = ("linear", "exponential", "polynomial")[m
+[32m+[m
+[32m+[m
+[32m+[m[32mdef _family_generate_coefficients(family, n_params, n_outputs, structure, structure_kwargs, seed):[m
+[32m+[m[32m    """Coefficient generation for one model block of generate_conflicting_truth_dataset,[m
+[32m+[m[32m    dispatched by family name. linear/exponential go through the same structure=[m
+[32m+[m[32m    full/diag/triu/blocks dispatch as their generate_*_dataset functions[m
+[32m+[m[32m    (_generate_structured_coefficients); polynomial always uses its own[m
+[32m+[m[32m    generate_matrix_full (degree/pairs/triplets are its own "structure").[m
+[32m+[m[32m    Returns (coefficients, paras_to_vary) -- coefficients is a plain array for[m
+[32m+[m[32m    linear/exponential, a dict of arrays for polynomial (same shape compute_Y expects).[m
+[32m+[m
+[32m+[m[32m    Adding a new family here is what makes this generator model-agnostic: any[m
+[32m+[m[32m    module exposing a compatible coefficient-generator + compute_Y can be[m
+[32m+[m[32m    wired in the same way. ODE/Lorenz96 aren't included since their n_outputs[m
+[32m+[m[32m    is a consequence of t_eval rather than chosen directly -- combining those[m
+[32m+[m[32m    would need the shared ensemble to carry a time axis too.[m
+[32m+[m[32m    """[m
+[32m+[m[32m    if family in ("linear", "exponential"):[m
+[32m+[m[32m        module = linear if family == "linear" else exponential[m
+[32m+[m[32m        coefficients, paras_to_vary, _outputs_to_vary, _extra = _generate_structured_coefficients([m
+[32m+[m[32m            module, n_params, n_outputs, structure, structure_kwargs, seed=seed)[m
+[32m+[m[32m        return coefficients, paras_to_vary[m
+[32m+[m[32m    if family == "polynomial":[m
+[32m+[m[32m        result = polynomial.generate_matrix_full(n_params, n_outputs, seed=seed, **(structure_kwargs or {}))[m
+[32m+[m[32m        coefficients = {k: v for k, v in result.items() if k != "paras_to_vary"}[m
+[32m+[m[32m        return coefficients, result["paras_to_vary"][m
+[32m+[m[32m    raise ValueError(f"unknown family: {family!r} (expected one of {_CONFLICTING_TRUTH_FAMILIES})")[m
+[32m+[m
+[32m+[m
+[32m+[m[32mdef _family_compute_Y(family, coefficients, X):[m
+[32m+[m[32m    if family == "linear":[m
+[32m+[m[32m        return linear.compute_Y(X, coefficients)[m
+[32m+[m[32m    if family == "exponential":[m
+[32m+[m[32m        return exponential.compute_Y(X, coefficients)[m
+[32m+[m[32m    if family == "polynomial":[m
+[32m+[m[32m        return polynomial.compute_Y([m
+[32m+[m[32m            X, coefficients["coefficients_linear"], coefficients["coefficients_quad"],[m
+[32m+[m[32m            coefficients["pairs"], coefficients["coefficients_pairs"],[m
+[32m+[m[32m            coefficients_cubic=coefficients.get("coefficients_cubic"),[m
+[32m+[m[32m            triplets=coefficients.get("triplets"), coefficients_triplets=coefficients.get("coefficients_triplets"))[m
+[32m+[m[32m    raise ValueError(f"unknown family: {family!r} (expected one of {_CONFLICTING_TRUTH_FAMILIES})")[m
+[32m+[m
+[32m+[m
+[32m+[m[32mdef generate_conflicting_truth_dataset(n_samples, n_params, model_specs, noise_std=0.0, seed=None, nc_path=None):[m
+[32m+[m[32m    """The multi-model structural-error scenario: a set of x values maps to y_1[m
+[32m+[m[32m    given model m_1, and the *same* x values also map to y_2 given a[m
+[32m+[m[32m    different model m_2 -- m_1 and m_2 share the same parameter space (same[m
+[32m+[m[32m    n_params), so the training ensemble (X, Y) is a single valid table with[m
+[32m+[m[32m    Y = [Y_1 | Y_2 | ...] as column-blocks, one per model. The conflict is in[m
+[32m+[m[32m    the truth: each model's y_true is generated from its *own*, independently[m
+[32m+[m[32m    sampled x_true_i rather than one shared x_true -- so a calibration[m
+[32m+[m[32m    exercise handed the joint y_true has no single x that can reproduce every[m
+[32m+[m[32m    block, which is the point (this is what "no parameter values satisfy y_1[m
+[32m+[m[32m    and y_2 given m_1 and m_2" looks like as data).[m
+[32m+[m
+[32m+[m[32m    model_specs: list of dicts, one per model/output-block:[m
+[32m+[m[32m        {"name": "m1" (optional, defaults to "m1", "m2", ...),[m
+[32m+[m[32m         "family": "linear" | "exponential" | "polynomial",[m
+[32m+[m[32m         "n_outputs": int,[m
+[32m+[m[32m         "structure": structure kwarg for that family's generator (default "full";[m
+[32m+[m[32m             ignored -- always "full" -- for polynomial, whose own knobs are[m
+[32m+[m[32m             degree/n_pairs/etc.),[m
+[32m+[m[32m         "structure_kwargs": dict of kwargs for that family's coefficient generator}[m
+[32m+[m[32m    See _family_generate_coefficients for which families are supported and how[m
+[32m+[m[32m    to add more.[m
+[32m+[m
+[32m+[m[32m    Returns a dataset dict shaped like generate_structural_regime_dataset's output[m
+[32m+[m[32m    for the parts that don't have a single answer -- x_true/y_true/coefficients[m
+[32m+[m[32m    are dicts keyed by model name -- plus:[m
+[32m+[m[32m        output_model_label: (n_outputs,) int, which model block each output column[m
+[32m+[m[32m            belongs to.[m
+[32m+[m[32m        cross_model_mismatch: (n_models, n_models) array; entry [i, j] is the[m
+[32m+[m[32m            normalized RMS gap between model i's actual y_true and what model i[m
+[32m+[m[32m            would predict at model j's x_true (each output normalized by its[m
+[32m+[m[32m            ensemble std, same convention as structural_error_level elsewhere).[m
+[32m+[m[32m            The diagonal is ~0 (noise_std only) by construction; large[m
+[32m+[m[32m            off-diagonal entries are the visible signature of the conflict.[m
+[32m+[m[32m    """[m
+[32m+[m[32m    rng = np.random.default_rng(seed)[m
+[32m+[m[32m    X = sample_X(n_samples, n_params, seed=seed)[m
+[32m+[m
+[32m+[m[32m    model_names, coefficients_by_model, compute_fns = [], {}, {}[m
+[32m+[m[32m    Y_blocks, x_true_by_model, y_true_clean_by_model, y_true_by_model = [], {}, {}, {}[m
+[32m+[m[32m    output_model_label_parts, per_model_metadata = [], {}[m
+[32m+[m
+[32m+[m[32m    for model_idx, spec in enumerate(model_specs):[m
+[32m+[m[32m        name = spec.get("name", f"m{model_idx + 1}")[m
+[32m+[m[32m        family = spec["family"][m
+[32m+[m[32m        n_outputs_i = spec["n_outputs"][m
+[32m+[m[32m        structure = spec.get("structure", "full")[m
+[32m+[m[32m        structure_kwargs = spec.get("structure_kwargs", {})[m
+[32m+[m[32m        model_seed = int(rng.integers(2**32))[m
+[32m+[m[32m        true_seed = int(rng.integers(2**32))[m
+[32m+[m
+[32m+[m[32m        coefficients_i, paras_to_vary_i = _family_generate_coefficients([m
+[32m+[m[32m            family, n_params, n_outputs_i, structure, structure_kwargs, seed=model_seed)[m
+[32m+[m[32m        Y_i = _family_compute_Y(family, coefficients_i, X)[m
+[32m+[m
+[32m+[m[32m        x_true_i = sample_X(1, n_params, seed=true_seed)[0][m
+[32m+[m[32m        y_true_i_clean = _family_compute_Y(family, coefficients_i, x_true_i[None, :])[0][m
+[32m+[m[32m        y_true_i, _structural_bias_i = add_true_observation_error([m
+[32m+[m[32m            y_true_i_clean, Y_i, noise_std=noise_std, seed=true_seed)[m
+[32m+[m
+[32m+[m[32m        model_names.append(name)[m
+[32m+[m[32m        coefficients_by_model[name] = coefficients_i[m
+[32m+[m[32m        compute_fns[name] = lambda Xin, c=coefficients_i, f=family: _family_compute_Y(f, c, Xin)[m
+[32m+[m[32m        Y_blocks.append(Y_i)[m
+[32m+[m[32m        x_true_by_model[name] = x_true_i[m
+[32m+[m[32m        y_true_clean_by_model[name] = y_true_i_clean[m
+[32m+[m[32m        y_true_by_model[name] = y_true_i[m
+[32m+[m[32m        output_model_label_parts.append(np.full(n_outputs_i, model_idx))[m
+[32m+[m[32m        per_model_metadata[name] = {[m
+[32m+[m[32m            "family": family, "structure": structure, "n_outputs": n_outputs_i,[m
+[32m+[m[32m            "paras_to_vary": list(paras_to_vary_i), "seed": model_seed,[m
+[32m+[m[32m        }[m
+[32m+[m
+[32m+[m[32m    Y = np.hstack(Y_blocks)[m
+[32m+[m[32m    output_model_label = np.concatenate(output_model_label_parts)[m
+[32m+[m
+[32m+[m[32m    n_models = len(model_names)[m
+[32m+[m[32m    cross_model_mismatch = np.zeros((n_models, n_models))[m
+[32m+[m[32m    for i, name_i in enumerate(model_names):[m
+[32m+[m[32m        ref_std = Y_blocks[i].std(axis=0)[m
+[32m+[m[32m        ref_std = np.where(ref_std == 0, 1.0, ref_std)[m
+[32m+[m[32m        for j, name_j in enumerate(model_names):[m
+[32m+[m[32m            y_pred = compute_fns[name_i](x_true_by_model[name_j][None, :])[0][m
+[32m+[m[32m            gap = (y_true_clean_by_model[name_i] - y_pred) / ref_std[m
+[32m+[m[32m            cross_model_mismatch[i, j] = np.sqrt(np.mean(gap ** 2))[m
+[32m+[m
+[32m+[m[32m    dataset = {[m
+[32m+[m[32m        "X": X,[m
+[32m+[m[32m        "Y": Y,[m
+[32m+[m[32m        "x_true": x_true_by_model,[m
+[32m+[m[32m        "y_true": y_true_by_model,[m
+[32m+[m[32m        "output_model_label": output_model_label,[m
+[32m+[m[32m        "cross_model_mismatch": cross_model_mismatch,[m
+[32m+[m[32m        "coefficients": coefficients_by_model,[m
+[32m+[m[32m        "metadata": {[m
+[32m+[m[32m            "model": "conflicting_truth",[m
+[32m+[m[32m            "structural_conflicting_models": True,[m
+[32m+[m[32m            "model_names": model_names,[m
+[32m+[m[32m            "n_samples": n_samples,[m
+[32m+[m[32m            "n_params": n_params,[m
+[32m+[m[32m            "n_outputs": int(Y.shape[1]),[m
+[32m+[m[32m            "noise_std": noise_std,[m
+[32m+[m[32m            "seed": seed,[m
+[32m+[m[32m            "per_model": per_model_metadata,[m
+[32m+[m[32m        },[m
+[32m+[m[32m    }[m
+[32m+[m[32m    if nc_path:[m
+[32m+[m[32m        save_dataset_netcdf(dataset, nc_path)[m
+[32m+[m[32m    return dataset[m
+[32m+[m
+[32m+[m
+ def generate_structural_regime_dataset(generate_fn, n_samples, regime_fraction=0.5,[m
+                                         kwargs_1=None, kwargs_2=None, seed=None, nc_path=None):[m
+     """Structural/model-form error, the way it actually shows up in practice:[m
+[1mdiff --git a/data_generator_funs/linear.py b/data_generator_funs/linear.py[m
+[1mindex 8c3efbd..2ae9995 100644[m
+[1m--- a/data_generator_funs/linear.py[m
+[1m+++ b/data_generator_funs/linear.py[m
+[36m@@ -1,10 +1,10 @@[m
+ import numpy as np[m
+ import random[m
+ [m
+[31m-def sample_X(n_samples, n_params, seed=None):[m
+[31m-    """Draws the input matrix X ~ N(0, 1), shape (n_samples, n_params)."""[m
+[32m+[m[32mdef sample_X(n_samples, n_params, low=-1.0, high=1.0, seed=None):[m
+[32m+[m[32m    """Draws the input matrix X ~ Uniform(low, high), shape (n_samples, n_params)."""[m
+     rng = np.random.default_rng(seed)[m
+[31m-    return rng.normal(size=(n_samples, n_params))[m
+[32m+[m[32m    return rng.uniform(low=low, high=high, size=(n_samples, n_params))[m
+ [m
+ [m
+ def generate_matrix_full(n_params, n_outputs, n_sensitive_para=0, n_sensitive_output=0, sensitivity_multiplier=2.0, seed = None):[m
+[36m@@ -64,6 +64,115 @@[m [mdef generate_matrix_triu(n_params, n_outputs, n_sensitive_para, n_sensitive_outp[m
+     return coefficients_I * coefficients[m
+ [m
+ [m
+[32m+[m[32mdef generate_matrix_blocks(n_params, n_outputs, param_group_sizes, output_group_sizes,[m
+[32m+[m[32m                            sensitivity_multiplier=2.0, background_scale=0.0, seed=None):[m
+[32m+[m[32m    """Block-diagonal sensitivity structure: partitions the n_params inputs into[m
+[32m+[m[32m    contiguous groups of sizes `param_group_sizes` and the n_outputs outputs into[m
+[32m+[m[32m    contiguous groups of sizes `output_group_sizes` (both must sum to n_params /[m
+[32m+[m[32m    n_outputs and have the same number of groups) -- group g's params are the[m
+[32m+[m[32m    (sole, if background_scale=0) drivers of group g's outputs, e.g.[m
+[32m+[m[32m    param_group_sizes=[2, 2], output_group_sizes=[3, 4] means params 0-1 drive[m
+[32m+[m[32m    outputs 0-2 and params 2-3 drive outputs 3-6, with no other coupling.[m
+[32m+[m
+[32m+[m[32m    background_scale (default 0.0, i.e. exact block-diagonal sparsity) optionally[m
+[32m+[m[32m    adds small cross-block coefficients on that scale so blocks aren't perfectly[m
+[32m+[m[32m    independent; within-block coefficients are drawn on `sensitivity_multiplier`'s[m
+[32m+[m[32m    scale, same amplification convention as the other structure functions here.[m
+[32m+[m
+[32m+[m[32m    Returns (coefficients, param_group_id, output_group_id): the last two are[m
+[32m+[m[32m    arrays of shape (n_params,) / (n_outputs,) giving each param's/output's group[m
+[32m+[m[32m    index, for visualization or downstream group-aware masking.[m
+[32m+[m[32m    """[m
+[32m+[m[32m    if sum(param_group_sizes) != n_params:[m
+[32m+[m[32m        raise ValueError(f"param_group_sizes must sum to n_params ({n_params}), got {sum(param_group_sizes)}")[m
+[32m+[m[32m    if sum(output_group_sizes) != n_outputs:[m
+[32m+[m[32m        raise ValueError(f"output_group_sizes must sum to n_outputs ({n_outputs}), got {sum(output_group_sizes)}")[m
+[32m+[m[32m    if len(param_group_sizes) != len(output_group_sizes):[m
+[32m+[m[32m        raise ValueError("param_group_sizes and output_group_sizes must have the same number of groups")[m
+[32m+[m
+[32m+[m[32m    rng = np.random.default_rng(seed)[m
+[32m+[m[32m    n_groups = len(param_group_sizes)[m
+[32m+[m[32m    coefficients = background_scale * rng.normal(size=(n_params, n_outputs))[m
+[32m+[m
+[32m+[m[32m    param_group_id = np.repeat(np.arange(n_groups), param_group_sizes)[m
+[32m+[m[32m    output_group_id = np.repeat(np.arange(n_groups), output_group_sizes)[m
+[32m+[m[32m    param_starts = np.concatenate([[0], np.cumsum(param_group_sizes)])[m
+[32m+[m[32m    output_starts = np.concatenate([[0], np.cumsum(output_group_sizes)])[m
+[32m+[m
+[32m+[m[32m    for g in range(n_groups):[m
+[32m+[m[32m        p0, p1 = param_starts[g], param_starts[g + 1][m
+[32m+[m[32m        o0, o1 = output_starts[g], output_starts[g + 1][m
+[32m+[m[32m        coefficients[p0:p1, o0:o1] = sensitivity_multiplier * rng.normal(size=(p1 - p0, o1 - o0))[m
+[32m+[m
+[32m+[m[32m    return coefficients, param_group_id, output_group_id[m
+[32m+[m
+[32m+[m
+[32m+[m[32mdef generate_matrix_overlapping_blocks(n_params, n_outputs, param_groups, output_group_sizes,[m
+[32m+[m[32m                                        sensitivity_multiplier=2.0, extra_links=None,[m
+[32m+[m[32m                                        shared_scale=1.0, background_scale=0.0, seed=None):[m
+[32m+[m[32m    """Like generate_matrix_blocks, but parameter groups may overlap -- a param can[m
+[32m+[m[32m    drive more than one output group. `param_groups` is a list of parameter-index[m
+[32m+[m[32m    lists, one per output group (not necessarily disjoint or contiguous), e.g.[m
+[32m+[m[32m    param_groups=[[0, 1], [1, 2]], output_group_sizes=[4, 6] means params 0-1 drive[m
+[32m+[m[32m    outputs 0-3 and params 1-2 drive outputs 4-9 -- param 1 is shared, driving both[m
+[32m+[m[32m    groups. `output_group_sizes` is still a strict contiguous partition of the[m
+[32m+[m[32m    n_outputs outputs (every output belongs to exactly one group); len(param_groups)[m
+[32m+[m[32m    must equal len(output_group_sizes). Every group's own diagonal block (param_groups[g][m
+[32m+[m[32m    x its own output block) is always amplified by `sensitivity_multiplier`.[m
+[32m+[m
+[32m+[m[32m    extra_links (optional): a list of (source_group_idx, target_group_idx) pairs, each[m
+[32m+[m[32m    meaning "source_group_idx's params ALSO get a plain (unamplified, `shared_scale`)[m
+[32m+[m[32m    coefficient block in target_group_idx's output columns", on top of every group's own[m
+[32m+[m[32m    amplified diagonal block. E.g. extra_links=[(0, -1)] with param_groups=[[0,1,2],[1,2],[m
+[32m+[m[32m    [3..9]] means params 0-2 (group 0) additionally drive the LAST group's outputs a[m
+[32m+[m[32m    little (unamplified), in addition to their own dedicated (amplified) block -- negative[m
+[32m+[m[32m    indices work as usual Python indexing into param_groups/output_group_sizes.[m
+[32m+[m
+[32m+[m[32m    Returns (coefficients, param_group_membership, output_group_id):[m
+[32m+[m[32m    param_group_membership is a (n_params, n_groups) bool array (row i is which groups[m
+[32m+[m[32m    param i has a real, non-background coefficient in -- includes both each group's own[m
+[32m+[m[32m    block and any extra_links insertions); output_group_id is (n_outputs,) int, same as[m
+[32m+[m[32m    generate_matrix_blocks.[m
+[32m+[m[32m    """[m
+[32m+[m[32m    if sum(output_group_sizes) != n_outputs:[m
+[32m+[m[32m        raise ValueError(f"output_group_sizes must sum to n_outputs ({n_outputs}), got {sum(output_group_sizes)}")[m
+[32m+[m[32m    if len(param_groups) != len(output_group_sizes):[m
+[32m+[m[32m        raise ValueError("param_groups and output_group_sizes must have the same number of groups")[m
+[32m+[m[32m    for g, idx in enumerate(param_groups):[m
+[32m+[m[32m        if any(i < 0 or i >= n_params for i in idx):[m
+[32m+[m[32m            raise ValueError(f"param_groups[{g}] contains a parameter index outside [0, {n_params})")[m
+[32m+[m[32m    n_groups = len(param_groups)[m
+[32m+[m
+[32m+[m[32m    normalized_links = [][m
+[32m+[m[32m    for source, target in (extra_links or []):[m
+[32m+[m[32m        if not (-n_groups <= source < n_groups):[m
+[32m+[m[32m            raise ValueError(f"extra_links source={source} out of range for {n_groups} groups")[m
+[32m+[m[32m        if not (-n_groups <= target < n_groups):[m
+[32m+[m[32m            raise ValueError(f"extra_links target={target} out of range for {n_groups} groups")[m
+[32m+[m[32m        normalized_links.append((source % n_groups, target % n_groups))[m
+[32m+[m
+[32m+[m[32m    rng = np.random.default_rng(seed)[m
+[32m+[m[32m    coefficients = background_scale * rng.normal(size=(n_params, n_outputs))[m
+[32m+[m
+[32m+[m[32m    output_group_id = np.repeat(np.arange(n_groups), output_group_sizes)[m
+[32m+[m[32m    output_starts = np.concatenate([[0], np.cumsum(output_group_sizes)])[m
+[32m+[m[32m    param_group_membership = np.zeros((n_params, n_groups), dtype=bool)[m
+[32m+[m
+[32m+[m[32m    for g in range(n_groups):[m
+[32m+[m[32m        idx = list(param_groups[g])[m
+[32m+[m[32m        param_group_membership[idx, g] = True[m
+[32m+[m[32m        o0, o1 = output_starts[g], output_starts[g + 1][m
+[32m+[m[32m        coefficients[idx, o0:o1] = sensitivity_multiplier * rng.normal(size=(len(idx), o1 - o0))[m
+[32m+[m
+[32m+[m[32m    for source, target in normalized_links:[m
+[32m+[m[32m        idx = list(param_groups[source])[m
+[32m+[m[32m        o0, o1 = output_starts[target], output_starts[target + 1][m
+[32m+[m[32m        coefficients[idx, o0:o1] = shared_scale * rng.normal(size=(len(idx), o1 - o0))[m
+[32m+[m[32m        param_group_membership[idx, target] = True[m
+[32m+[m
+[32m+[m[32m    return coefficients, param_group_membership, output_group_id[m
+[32m+[m
+[32m+[m
+ def compute_Y(X, coefficients):[m
+     """y = X @ coefficients, shape (n_samples, n_outputs)."""[m
+     return X @ coefficients[m
