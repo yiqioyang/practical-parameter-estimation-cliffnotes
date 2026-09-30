@@ -3,7 +3,8 @@
 
 Layout expected under ROOT (e.g. ds_Sep2_2026/):
     <dataset>/x_true.csv                  one folder per dataset (not starting with "Results")
-    Results_<method>/results_<dataset>.csv  posterior samples, one column per parameter
+    Results_<who>/results_<dataset>.csv   posterior samples, one column per parameter
+    Results_<who>/<method>/results_<dataset>.csv  same, when one person submits several methods
 
 Usage:
     python grade.py ds_Sep2_2026                  # use all samples
@@ -11,7 +12,7 @@ Usage:
     python grade.py ds_Sep2_2026 --no_plots
 
 Outputs:
-    Results_<method>/grades/n_<tag>/   per_parameter.csv, pairwise.csv, summary.csv, plots/
+    <submission>/grades/n_<tag>/       per_parameter.csv, pairwise.csv, summary.csv, plots/
     ROOT/leaderboard/n_<tag>/          leaderboard.csv, leaderboard_by_dataset.csv, leaderboard.png
 
 See METRICS.md for what each metric means and which direction is better.
@@ -32,8 +33,10 @@ from matplotlib.colors import LinearSegmentedColormap  # noqa: E402
 
 RESULTS_PREFIX = "Results"
 RESULTS_FILE = "results_{dataset}.csv"
+GRADES_DIR = "grades"
 TRUTH_FILE = "x_true.csv"
 LEVELS = (0.50, 0.90, 0.95)
+DEGENERATE_TOL = 1e-9  # spread below this fraction of the prior width counts as a point mass
 
 # Chart colors (light surface)
 SURFACE = "#fcfcfb"
@@ -62,8 +65,25 @@ def find_datasets(root):
                   if p.is_dir() and not p.name.startswith(RESULTS_PREFIX) and (p / TRUTH_FILE).is_file())
 
 
-def find_methods(root):
-    return sorted(p for p in root.iterdir() if p.is_dir() and p.name.startswith(RESULTS_PREFIX))
+def has_results(d):
+    return any(d.glob(RESULTS_FILE.format(dataset="*")))
+
+
+def find_submissions(root):
+    """Return one (label, dir) pair per submission, i.e. per set of results to grade.
+
+    A Results_<who> folder either holds its results files directly (one submission,
+    labelled "Results_<who>") or groups them in per-method subfolders (one submission
+    each, labelled "Results_<who>/<method>"). Both may appear in the same folder.
+    """
+    subs = []
+    for d in sorted(p for p in root.iterdir() if p.is_dir() and p.name.startswith(RESULTS_PREFIX)):
+        if has_results(d):
+            subs.append((d.name, d))
+        for sub_dir in sorted(p for p in d.iterdir() if p.is_dir() and p.name != GRADES_DIR):
+            if has_results(sub_dir):
+                subs.append((f"{d.name}/{sub_dir.name}", sub_dir))
+    return subs
 
 
 def load_truth(dataset_dir):
@@ -121,16 +141,29 @@ def kde_hpd_level(points, truth):
     return float(np.mean(dens_loo > kde(truth[:, None])[0]))
 
 
+def is_degenerate(samples, width):
+    """True if the samples are a point mass, i.e. carry no spread worth a density estimate.
+
+    Grid or brute-force searches often return one value repeated, and rounding leaves float
+    noise (std ~ 1e-16) rather than an exact zero, so testing against the prior width is
+    safer than testing for equality: the noise would otherwise break the KDEs and blow up
+    the z-score.
+    """
+    return bool(np.ptp(samples) <= DEGENERATE_TOL * width)
+
+
 def kde_entropy_1d(samples, low, high):
     """Differential entropy (nats) = -mean log f(x_i), with f a leave-one-out Gaussian KDE
     reflected at the prior bounds. Robust to repeated samples (e.g. MCMC rejections)."""
     n = len(samples)
-    if np.std(samples) == 0:
+    if is_degenerate(samples, high - low):
         return np.nan
     kde = stats.gaussian_kde(samples)
     h2 = kde.covariance[0, 0]
     dens = kde(samples) + kde(2 * low - samples) + kde(2 * high - samples)
     dens_loo = (dens - 1.0 / (n * np.sqrt(2 * np.pi * h2))) * n / (n - 1)
+    if np.any(dens_loo <= 0):
+        return np.nan  # a sample the other samples cannot support (few distinct values): not estimable
     return float(-np.mean(np.log(dens_loo)))
 
 
@@ -165,9 +198,11 @@ def grade_dataset(S, truth, prior_low, prior_high):
     per_param = []
     for k, name in enumerate(names):
         s, t = S[:, k], y[k]
-        mean, median, std = s.mean(), np.median(s), s.std(ddof=1)
+        degenerate = is_degenerate(s, prior_high - prior_low)
+        mean, median = s.mean(), np.median(s)
+        std = 0.0 if degenerate else s.std(ddof=1)  # drop float noise so z stays undefined, not huge
         entropy = kde_entropy_1d(s, prior_low, prior_high)
-        row = dict(param=name, x_true=t, mean=mean, median=median, std=std,
+        row = dict(param=name, x_true=t, mean=mean, median=median, std=std, degenerate=degenerate,
                    bias=mean - t, abs_err_mean=abs(mean - t), abs_err_median=abs(median - t),
                    z_score=(mean - t) / std if std > 0 else np.nan,
                    percentile_rank=(np.sum(s < t) + 0.5 * np.sum(s == t)) / n,
@@ -202,6 +237,7 @@ def grade_dataset(S, truth, prior_low, prior_high):
         mean_abs_z=pp.z_score.abs().mean(),
         max_abs_z=pp.z_score.abs().max(),
         frac_abs_z_gt2=(pp.z_score.abs() > 2).mean(),
+        frac_degenerate=pp.degenerate.mean(),
         cov1d_minmax=pp.in_minmax.mean(),
         **{f"cov1d_ci{pct(lv)}": pp[f"in_ci{pct(lv)}"].mean() for lv in LEVELS},
         rank_ks=stats.kstest(pp.percentile_rank, "uniform").statistic,
@@ -331,7 +367,8 @@ def plot_leaderboard(by_dataset, overall, path):
         for m_i, m in enumerate(methods):
             sub = by_dataset[by_dataset.method == m].set_index("dataset").reindex(datasets)
             ypos = np.arange(len(datasets)) + (m_i - (len(methods) - 1) / 2) * bar_h
-            ax.barh(ypos, sub[col], height=bar_h * 0.9, color=SERIES[m_i], lw=0, label=m)
+            ax.barh(ypos, sub[col], height=bar_h * 0.9, color=SERIES[m_i], lw=0,
+                    label=m.removeprefix(RESULTS_PREFIX + "_"))
         if ref is not None:
             ax.axvline(ref, color=MUTED, lw=0.8, ls="--")
         ax.set_title(textwrap.fill(label, 32), fontsize=9, color=INK)
@@ -367,15 +404,14 @@ def main():
     tag = f"n_{args.n_sample}"
     root = args.root.resolve()
     datasets = find_datasets(root)
-    methods = find_methods(root)
+    submissions = find_submissions(root)
     print(f"Root: {root}\nDatasets ({len(datasets)}): {[d.name for d in datasets]}\n"
-          f"Methods ({len(methods)}): {[m.name for m in methods]}\nSamples used: {args.n_sample}\n")
+          f"Methods ({len(submissions)}): {[m for m, _ in submissions]}\nSamples used: {args.n_sample}\n")
 
     all_summaries = []
-    for method_dir in methods:
-        method = method_dir.name
+    for method, method_dir in submissions:
         print(f"=== {method}")
-        out = method_dir / "grades" / tag
+        out = method_dir / GRADES_DIR / tag
         (out / "plots").mkdir(parents=True, exist_ok=True)
         pps, pws, sums = [], [], []
         for ds_dir in datasets:
@@ -426,7 +462,7 @@ def main():
         plot_leaderboard(by_dataset, overall, lb / "leaderboard.png")
 
     key = ["crps_mean", "energy_score", "rmse_mean", "mean_abs_z", "cov1d_ci90", "cov2d_hpd90",
-           "in_joint90", "contraction_mean", "entropy_reduction_1d_mean"]
+           "in_joint90", "contraction_mean", "entropy_reduction_1d_mean", "frac_degenerate"]
     with pd.option_context("display.width", 250, "display.max_columns", 50, "display.float_format", "{:.3f}".format):
         print("Per dataset:")
         print(by_dataset.set_index(["method", "dataset"])[["n_samples"] + key].to_string())
